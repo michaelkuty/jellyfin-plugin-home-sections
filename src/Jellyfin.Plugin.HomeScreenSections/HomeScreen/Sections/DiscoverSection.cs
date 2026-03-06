@@ -57,7 +57,12 @@ namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
             
             HttpResponseMessage usersResponse = client.GetAsync($"/api/v1/user?q={user.Username}").GetAwaiter().GetResult();
             string userResponseRaw = usersResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-            int? jellyseerrUserId = JObject.Parse(userResponseRaw).Value<JArray>("results")!.OfType<JObject>().FirstOrDefault(x => x.Value<string>("jellyfinUsername") == user.Username)?.Value<int>("id");
+            JArray? userResults = JObject.Parse(userResponseRaw).Value<JArray>("results");
+            if (userResults == null)
+            {
+                return new QueryResult<BaseItemDto>();
+            }
+            int? jellyseerrUserId = userResults.OfType<JObject>().FirstOrDefault(x => x.Value<string>("jellyfinUsername") == user.Username)?.Value<int>("id");
 
             if (jellyseerrUserId == null)
             {
