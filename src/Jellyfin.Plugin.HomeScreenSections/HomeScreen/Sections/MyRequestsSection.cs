@@ -153,6 +153,14 @@ namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
                         }
                     }
 
+                    // If no requests have jellyfinMediaId, return empty immediately.
+                    // An empty ItemIds array causes Jellyfin to return ALL items (no filter).
+                    if (presentCount == 0)
+                    {
+                        _logger.LogInformation("MyRequests: No requests with jellyfinMediaId, returning empty");
+                        return new QueryResult<BaseItemDto>();
+                    }
+
                     VirtualFolderInfo[] folders = m_libraryManager.GetVirtualFolders()
                         .FilterToUserPermitted(m_libraryManager, user);
 
