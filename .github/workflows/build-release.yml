@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        jellyfin-version: ["10.11.5"]
+        jellyfin-version: ["10.11.5", "10.11.6"]
     steps:
       - uses: actions/checkout@v4
 
@@ -27,15 +27,22 @@ jobs:
 
       - name: Build
         run: |
-          dotnet publish src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj \
+          dotnet build src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj \
             -c Release \
-            -p:JellyfinVersion=${{ matrix.jellyfin-version }} \
-            -o ./output
+            -p:JellyfinVersion=${{ matrix.jellyfin-version }}
 
       - name: Package
         run: |
-          cd output
-          zip -r ../Release-${{ matrix.jellyfin-version }}.zip *.dll *.json *.png 2>/dev/null || zip -r ../Release-${{ matrix.jellyfin-version }}.zip *.dll
+          BUILD_DIR=src/Jellyfin.Plugin.HomeScreenSections/bin/Release/net9.0
+          cd "$BUILD_DIR"
+          zip -r "$GITHUB_WORKSPACE/Release-${{ matrix.jellyfin-version }}.zip" \
+            Jellyfin.Plugin.HomeScreenSections.dll \
+            0Harmony.dll \
+            Newtonsoft.Json.dll \
+            SkiaSharp.dll \
+            logo.png \
+            2>/dev/null || zip -r "$GITHUB_WORKSPACE/Release-${{ matrix.jellyfin-version }}.zip" \
+            Jellyfin.Plugin.HomeScreenSections.dll
 
       - name: Get checksum
         id: checksum
@@ -52,9 +59,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update manifest.json
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksum-${{ matrix.jellyfin-version }}
+          path: |
+            Release-${{ matrix.jellyfin-version }}.zip
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '<Version>' src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj | sed 's/.*<Version>\(.*\)<\/Version>.*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate manifest
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
+          VERSION=${{ steps.version.outputs.version }}
+          MD5_11_5=$(md5sum checksum-10.11.5/Release-10.11.5.zip | awk '{print toupper($1)}')
+          MD5_11_6=$(md5sum checksum-10.11.6/Release-10.11.6.zip | awk '{print toupper($1)}')
           cat > manifest.json << EOF
           [
             {
@@ -66,11 +98,19 @@ jobs:
               "category": "General",
               "versions": [
                 {
-                  "version": "${{ steps.version.outputs.version }}",
+                  "version": "${VERSION}",
                   "changelog": "Fix null crash when seerr user query returns no results",
-                  "targetAbi": "${{ matrix.jellyfin-version }}.0",
-                  "sourceUrl": "https://github.com/michaelkuty/jellyfin-plugin-home-sections/releases/download/v${{ steps.version.outputs.version }}/Release-${{ matrix.jellyfin-version }}.zip",
-                  "checksum": "${{ steps.checksum.outputs.md5 }}",
+                  "targetAbi": "10.11.5.0",
+                  "sourceUrl": "https://github.com/michaelkuty/jellyfin-plugin-home-sections/releases/download/v${VERSION}/Release-10.11.5.zip",
+                  "checksum": "${MD5_11_5}",
+                  "timestamp": "${TIMESTAMP}"
+                },
+                {
+                  "version": "${VERSION}",
+                  "changelog": "Fix null crash when seerr user query returns no results",
+                  "targetAbi": "10.11.6.0",
+                  "sourceUrl": "https://github.com/michaelkuty/jellyfin-plugin-home-sections/releases/download/v${VERSION}/Release-10.11.6.zip",
+                  "checksum": "${MD5_11_6}",
                   "timestamp": "${TIMESTAMP}"
                 }
               ]
