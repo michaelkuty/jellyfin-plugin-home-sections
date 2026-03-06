@@ -10,6 +10,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 
 namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
@@ -19,17 +20,18 @@ namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
         private readonly IUserManager m_userManager;
         private readonly ILibraryManager m_libraryManager;
         private readonly IDtoService m_dtoService;
+        private static readonly ILogger _logger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<MyRequestsSection>();
 
         public string? Section => "MyJellyseerrRequests";
-        
+
         public string? DisplayText { get; set; } = "My Requests";
-        
+
         public int? Limit => 1;
-        
+
         public string? Route => null;
-        
+
         public string? AdditionalData { get; set; } = null;
-        
+
         public object? OriginalPayload { get; } = null;
 
         public MyRequestsSection(IUserManager userManager, ILibraryManager libraryManager, IDtoService dtoService)
@@ -38,14 +40,14 @@ namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
             m_libraryManager = libraryManager;
             m_dtoService = dtoService;
         }
-        
+
         public QueryResult<BaseItemDto> GetResults(HomeScreenSectionPayload payload, IQueryCollection queryCollection)
         {
-            DtoOptions? dtoOptions = new DtoOptions 
-            { 
-                Fields = new[] 
-                { 
-                    ItemFields.PrimaryImageAspectRatio, 
+            DtoOptions? dtoOptions = new DtoOptions
+            {
+                Fields = new[]
+                {
+                    ItemFields.PrimaryImageAspectRatio,
                     ItemFields.MediaSourceCount
                 }
             };
@@ -54,63 +56,147 @@ namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
 
             if (string.IsNullOrEmpty(jellyseerrUrl))
             {
+                _logger.LogWarning("MyRequests: Jellyseerr URL not configured");
                 return new QueryResult<BaseItemDto>();
             }
-            
+
             User? user = m_userManager.GetUserById(payload.UserId);
-            
-            HttpClient client = new HttpClient();
-            client.BaseAddress = new Uri(jellyseerrUrl);
-            client.DefaultRequestHeaders.Add("X-Api-Key", HomeScreenSectionsPlugin.Instance.Configuration.JellyseerrApiKey);
-            
-            HttpResponseMessage usersResponse = client.GetAsync($"/api/v1/user?q={Uri.EscapeDataString(user.Username)}").GetAwaiter().GetResult();
-            string userResponseRaw = usersResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-            int? jellyseerrUserId = JObject.Parse(userResponseRaw).Value<JArray>("results")?.OfType<JObject>().FirstOrDefault(x => x.Value<string>("jellyfinUsername") == user.Username)?.Value<int>("id");
-
-            if (jellyseerrUserId == null)
+            if (user == null)
             {
+                _logger.LogWarning("MyRequests: User {UserId} not found", payload.UserId);
                 return new QueryResult<BaseItemDto>();
             }
-            
-            HttpResponseMessage requestsResponse = client.GetAsync($"/api/v1/user/{jellyseerrUserId}/requests?take=100").GetAwaiter().GetResult();
 
-            if (requestsResponse.IsSuccessStatusCode)
+            _logger.LogInformation("MyRequests: Looking up Jellyfin user \"{Username}\" (ID: {UserId}) in Seerr at {Url}",
+                user.Username, payload.UserId, jellyseerrUrl);
+
+            try
             {
-                string jsonRaw = requestsResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                JObject? jsonResponse = JObject.Parse(jsonRaw);
-                IEnumerable<JObject>? presentRequestedMedia = jsonResponse.Value<JArray>("results")?.OfType<JObject>()
-                    .Where(x => x.Value<JObject>("media")?.Value<string>("jellyfinMediaId") != null)
-                    .Select(x => x.Value<JObject>("media")!);
+                HttpClient client = new HttpClient();
+                client.BaseAddress = new Uri(jellyseerrUrl);
+                client.Timeout = TimeSpan.FromSeconds(15);
+                client.DefaultRequestHeaders.Add("X-Api-Key", HomeScreenSectionsPlugin.Instance.Configuration.JellyseerrApiKey);
 
-                VirtualFolderInfo[] folders = m_libraryManager.GetVirtualFolders()
-                    .FilterToUserPermitted(m_libraryManager, user);
+                string userSearchUrl = $"/api/v1/user?q={Uri.EscapeDataString(user.Username)}";
+                _logger.LogDebug("MyRequests: Calling Seerr user search: {Url}", userSearchUrl);
 
-                IEnumerable<string?>? jellyfinItemIds = presentRequestedMedia?.Select(x => x.Value<string>("jellyfinMediaId"));
+                HttpResponseMessage usersResponse = client.GetAsync(userSearchUrl).GetAwaiter().GetResult();
 
-                var config = HomeScreenSectionsPlugin.Instance?.Configuration;
-                var sectionSettings = config?.SectionSettings.FirstOrDefault(x => x.SectionId == Section);
-                bool hideWatchedItems = sectionSettings?.HideWatchedItems == true;
-
-                IEnumerable<BaseItem> items = folders.SelectMany(x =>
+                if (!usersResponse.IsSuccessStatusCode)
                 {
-                    return m_libraryManager.GetItemList(new InternalItemsQuery(user)
+                    _logger.LogWarning("MyRequests: Seerr user search returned {StatusCode}", usersResponse.StatusCode);
+                    return new QueryResult<BaseItemDto>();
+                }
+
+                string userResponseRaw = usersResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                _logger.LogDebug("MyRequests: Seerr user search response: {Response}", userResponseRaw);
+
+                JArray? userResults = JObject.Parse(userResponseRaw).Value<JArray>("results");
+                if (userResults == null)
+                {
+                    _logger.LogWarning("MyRequests: Seerr returned null results for user search");
+                    return new QueryResult<BaseItemDto>();
+                }
+
+                int? jellyseerrUserId = userResults.OfType<JObject>()
+                    .FirstOrDefault(x => x.Value<string>("jellyfinUsername") == user.Username)
+                    ?.Value<int>("id");
+
+                if (jellyseerrUserId == null)
+                {
+                    _logger.LogWarning("MyRequests: No Seerr user found with jellyfinUsername=\"{Username}\". Found {Count} users in results.",
+                        user.Username, userResults.Count);
+                    foreach (var u in userResults.OfType<JObject>())
                     {
-                        ItemIds = jellyfinItemIds?.Select(y => Guid.Parse(y ?? Guid.Empty.ToString()))?.ToArray() ?? Array.Empty<Guid>(),
-                        Recursive = true,
-                        EnableTotalRecordCount = false,
-                        ParentId = Guid.Parse(x.ItemId ?? Guid.Empty.ToString())
-                    });
-                }).OrderByDescending(item => item.DateCreated);
-            // Filter watched items after query since IsPlayed parameter doesn't work with specific ItemIds for TV shows
-            if (hideWatchedItems)
+                        _logger.LogDebug("MyRequests: Seerr user: jellyfinUsername=\"{JfName}\", email=\"{Email}\", displayName=\"{Name}\"",
+                            u.Value<string>("jellyfinUsername"), u.Value<string>("email"), u.Value<string>("displayName"));
+                    }
+                    return new QueryResult<BaseItemDto>();
+                }
+
+                _logger.LogInformation("MyRequests: Matched Seerr user ID {SeerrUserId} for Jellyfin user \"{Username}\"",
+                    jellyseerrUserId, user.Username);
+
+                string requestsUrl = $"/api/v1/user/{jellyseerrUserId}/requests?take=100";
+                _logger.LogDebug("MyRequests: Fetching requests: {Url}", requestsUrl);
+
+                HttpResponseMessage requestsResponse = client.GetAsync(requestsUrl).GetAwaiter().GetResult();
+
+                if (requestsResponse.IsSuccessStatusCode)
+                {
+                    string jsonRaw = requestsResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    JObject? jsonResponse = JObject.Parse(jsonRaw);
+
+                    JArray? allResults = jsonResponse?.Value<JArray>("results");
+                    _logger.LogInformation("MyRequests: Got {Count} total requests from Seerr", allResults?.Count ?? 0);
+
+                    IEnumerable<JObject>? presentRequestedMedia = allResults?.OfType<JObject>()
+                        .Where(x => x.Value<JObject>("media")?.Value<string>("jellyfinMediaId") != null)
+                        .Select(x => x.Value<JObject>("media")!);
+
+                    int presentCount = presentRequestedMedia?.Count() ?? 0;
+                    _logger.LogInformation("MyRequests: {PresentCount} requests have jellyfinMediaId (out of {TotalCount})",
+                        presentCount, allResults?.Count ?? 0);
+
+                    // Log requests that are missing jellyfinMediaId for debugging
+                    if (allResults != null)
+                    {
+                        foreach (var req in allResults.OfType<JObject>())
+                        {
+                            var media = req.Value<JObject>("media");
+                            string? mediaType = media?.Value<string>("mediaType");
+                            string? jfMediaId = media?.Value<string>("jellyfinMediaId");
+                            int? mediaStatus = media?.Value<int>("status");
+                            string? reqStatus = req.Value<string>("status");
+                            _logger.LogDebug("MyRequests: Request - type={MediaType}, jellyfinMediaId={JfId}, mediaStatus={MediaStatus}, requestStatus={ReqStatus}",
+                                mediaType, jfMediaId ?? "(null)", mediaStatus, reqStatus);
+                        }
+                    }
+
+                    VirtualFolderInfo[] folders = m_libraryManager.GetVirtualFolders()
+                        .FilterToUserPermitted(m_libraryManager, user);
+
+                    _logger.LogDebug("MyRequests: User has access to {FolderCount} library folders", folders.Length);
+
+                    IEnumerable<string?>? jellyfinItemIds = presentRequestedMedia?.Select(x => x.Value<string>("jellyfinMediaId"));
+
+                    var config = HomeScreenSectionsPlugin.Instance?.Configuration;
+                    var sectionSettings = config?.SectionSettings.FirstOrDefault(x => x.SectionId == Section);
+                    bool hideWatchedItems = sectionSettings?.HideWatchedItems == true;
+
+                    IEnumerable<BaseItem> items = folders.SelectMany(x =>
+                    {
+                        return m_libraryManager.GetItemList(new InternalItemsQuery(user)
+                        {
+                            ItemIds = jellyfinItemIds?.Select(y => Guid.Parse(y ?? Guid.Empty.ToString()))?.ToArray() ?? Array.Empty<Guid>(),
+                            Recursive = true,
+                            EnableTotalRecordCount = false,
+                            ParentId = Guid.Parse(x.ItemId ?? Guid.Empty.ToString())
+                        });
+                    }).OrderByDescending(item => item.DateCreated);
+
+                    if (hideWatchedItems)
+                    {
+                        items = items.Where(item => !item.IsPlayedVersionSpecific(user));
+                    }
+
+                    var finalItems = items.Take(16).ToArray();
+                    _logger.LogInformation("MyRequests: Returning {Count} items for user \"{Username}\"", finalItems.Length, user.Username);
+
+                    return new QueryResult<BaseItemDto>(m_dtoService.GetBaseItemDtos(finalItems, dtoOptions, user));
+                }
+                else
+                {
+                    _logger.LogWarning("MyRequests: Requests endpoint returned {StatusCode}", requestsResponse.StatusCode);
+                }
+
+                return new QueryResult<BaseItemDto>();
+            }
+            catch (Exception ex)
             {
-                items = items.Where(item => !item.IsPlayedVersionSpecific(user));
+                _logger.LogError(ex, "MyRequests: Error fetching requests from Seerr at {Url}", jellyseerrUrl);
+                return new QueryResult<BaseItemDto>();
             }
-                
-                return new QueryResult<BaseItemDto>(m_dtoService.GetBaseItemDtos(items.Take(16).ToArray(), dtoOptions, user));
-            }
-            
-            return new QueryResult<BaseItemDto>();
         }
 
         public IEnumerable<IHomeScreenSection> CreateInstances(Guid? userId, int instanceCount)
