@@ -1,0 +1,87 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        jellyfin-version: ["10.11.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '<Version>' src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj | sed 's/.*<Version>\(.*\)<\/Version>.*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build
+        run: |
+          dotnet publish src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj \
+            -c Release \
+            -p:JellyfinVersion=${{ matrix.jellyfin-version }} \
+            -o ./output
+
+      - name: Package
+        run: |
+          cd output
+          zip -r ../Release-${{ matrix.jellyfin-version }}.zip *.dll *.json *.png 2>/dev/null || zip -r ../Release-${{ matrix.jellyfin-version }}.zip *.dll
+
+      - name: Get checksum
+        id: checksum
+        run: |
+          echo "md5=$(md5sum Release-${{ matrix.jellyfin-version }}.zip | awk '{print toupper($1)}')" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          files: Release-${{ matrix.jellyfin-version }}.zip
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update manifest.json
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
+          cat > manifest.json << EOF
+          [
+            {
+              "guid": "b8298e01-2697-407a-b44d-aa8dc795e850",
+              "name": "Home Screen Sections",
+              "overview": "Adds support for server provided home screen sections (fixed fork)",
+              "description": "Adds support for server provided home screen sections with OIDC compatibility fix",
+              "owner": "michaelkuty",
+              "category": "General",
+              "versions": [
+                {
+                  "version": "${{ steps.version.outputs.version }}",
+                  "changelog": "Fix null crash when seerr user query returns no results",
+                  "targetAbi": "${{ matrix.jellyfin-version }}.0",
+                  "sourceUrl": "https://github.com/michaelkuty/jellyfin-plugin-home-sections/releases/download/v${{ steps.version.outputs.version }}/Release-${{ matrix.jellyfin-version }}.zip",
+                  "checksum": "${{ steps.checksum.outputs.md5 }}",
+                  "timestamp": "${TIMESTAMP}"
+                }
+              ]
+            }
+          ]
+          EOF
+
+      - name: Commit manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git diff --cached --quiet || git commit -m "chore: update manifest.json"
+          git push
