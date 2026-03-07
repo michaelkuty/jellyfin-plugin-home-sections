@@ -12,16 +12,16 @@
         "changelog": "Fix null crash when seerr user query returns no results",
         "targetAbi": "10.11.5.0",
         "sourceUrl": "https://github.com/michaelkuty/jellyfin-plugin-home-sections/releases/download/v2.5.1.0/Release-10.11.5.zip",
-        "checksum": "E8FDE0ED4262F985B138EF1F00F9100A",
-        "timestamp": "2026-03-06T21:40:02"
+        "checksum": "EB9D205B1F6BFA53FB0CA46F1058100C",
+        "timestamp": "2026-03-07T22:15:04"
       },
       {
         "version": "2.5.1.0",
         "changelog": "Fix null crash when seerr user query returns no results",
         "targetAbi": "10.11.6.0",
         "sourceUrl": "https://github.com/michaelkuty/jellyfin-plugin-home-sections/releases/download/v2.5.1.0/Release-10.11.6.zip",
-        "checksum": "80F4D8668A19DA2FCC5C926D0BE037EF",
-        "timestamp": "2026-03-06T21:40:02"
+        "checksum": "2879D23FFCA66791198838552F1359AD",
+        "timestamp": "2026-03-07T22:15:04"
       }
     ]
   }
