@@ -91,13 +91,23 @@ namespace Jellyfin.Plugin.HomeScreenSections.HomeScreen.Sections
                     return new QueryResult<BaseItemDto>();
                 }
 
-                int? jellyseerrUserId = userResults.OfType<JObject>().FirstOrDefault(x => x.Value<string>("jellyfinUsername") == user.Username)?.Value<int>("id");
+                // Try matching by jellyfinUsername first, then fall back to email
+                int? jellyseerrUserId = userResults.OfType<JObject>()
+                    .FirstOrDefault(x => x.Value<string>("jellyfinUsername") == user.Username)
+                    ?.Value<int>("id");
 
                 if (jellyseerrUserId == null)
                 {
-                    _logger.LogWarning("DiscoverSection: No Seerr user found with jellyfinUsername=\"{Username}\". Found {Count} users in results.",
+                    // Fallback: match by email (handles OIDC users whose Jellyfin username is their email)
+                    jellyseerrUserId = userResults.OfType<JObject>()
+                        .FirstOrDefault(x => string.Equals(x.Value<string>("email"), user.Username, StringComparison.OrdinalIgnoreCase))
+                        ?.Value<int>("id");
+                }
+
+                if (jellyseerrUserId == null)
+                {
+                    _logger.LogWarning("DiscoverSection: No Seerr user found matching \"{Username}\". Found {Count} users in results.",
                         user.Username, userResults.Count);
-                    // Log what usernames were found for debugging
                     foreach (var u in userResults.OfType<JObject>())
                     {
                         _logger.LogDebug("DiscoverSection: Seerr user: jellyfinUsername=\"{JfName}\", email=\"{Email}\"",
